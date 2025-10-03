@@ -1,0 +1,30 @@
+﻿{
+  "website_name": "Placeholder Site",
+  "capture_mode": "raw",
+  "start_urls": [
+    "https://example.com/page-1",
+    "https://example.com/page-2"
+  ],
+  "login_required": false,
+  "login_url": "https://example.com/login",
+  "login_username_field": "username",
+  "login_password_field": "password",
+  "credentials": {
+    "username": "REPLACE_WITH_USERNAME",
+    "password": "REPLACE_WITH_PASSWORD"
+  },
+  "request_headers": {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
+    "Referer": "https://example.com/dashboard"
+  },
+  "session_cookies": {
+    "sessionid": "REPLACE_WITH_SESSION_COOKIE"
+  },
+  "question_selector": ".question",
+  "answer_selector": ".answer-option",
+  "explanation_selector": ".explanation",
+  "raw_include_text": true,
+  "output_format": "json",
+  "output_filename": "scraped_pages.json",
+  "rate_limit_delay": 1
+}
