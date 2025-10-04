@@ -23,6 +23,12 @@
   "question_selector": ".question",
   "answer_selector": ".answer-option",
   "explanation_selector": ".explanation",
+  "table_selectors": [
+    "table.data-table"
+  ],
+  "image_selectors": [
+    "img.question-image"
+  ],
   "raw_include_text": true,
   "output_format": "json",
   "output_filename": "scraped_pages.json",

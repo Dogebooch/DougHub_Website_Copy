@@ -8,9 +8,10 @@ import subprocess
 import sys
 import threading
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any, Dict
 
 from PyQt5 import QtCore, QtWidgets
+from PyQt5.QtCore import pyqtSlot  # type: ignore[attr-defined]
 
 from scraper import ConfigError, LoginError, Scraper, ScraperError
 
@@ -33,19 +34,17 @@ class ScraperGUI(QtWidgets.QWidget):
         self.scraping_complete.connect(self._on_scraping_complete)
 
         self._init_ui()
-        self._load_config_into_ui()
+
+        try:
+            self._load_config()
+        except ConfigError as exc:
+            self.log_signal.emit(str(exc))
 
     # ------------------------------------------------------------------
     # UI setup and configuration helpers
     # ------------------------------------------------------------------
     def _init_ui(self) -> None:
         layout = QtWidgets.QVBoxLayout(self)
-
-        url_label = QtWidgets.QLabel("Start URLs (comma separated):")
-        layout.addWidget(url_label)
-
-        self.url_input = QtWidgets.QLineEdit()
-        layout.addWidget(self.url_input)
 
         self.log_output = QtWidgets.QTextEdit()
         self.log_output.setReadOnly(True)
@@ -71,47 +70,12 @@ class ScraperGUI(QtWidgets.QWidget):
         except json.JSONDecodeError as exc:
             raise ConfigError(f"Invalid JSON in configuration file: {exc}") from exc
 
-    def _load_config_into_ui(self) -> None:
-        try:
-            config = self._load_config()
-        except ConfigError as exc:
-            self.log_signal.emit(str(exc))
-            return
-
-        start_urls = config.get("start_urls", []) or []
-        joined_urls = ", ".join(start_urls)
-        self.url_input.setText(joined_urls)
-
-    def _persist_urls(self, urls: List[str]) -> None:
-        config = self._load_config()
-        config["start_urls"] = urls
-        self.config_path.write_text(json.dumps(config, ensure_ascii=False, indent=2), encoding="utf-8")
-
     # ------------------------------------------------------------------
     # Event handlers
     # ------------------------------------------------------------------
     def start_scraping(self) -> None:
         self.log_output.clear()
         self.start_button.setEnabled(False)
-
-        raw_urls = self.url_input.text().split(",")
-        urls = [url.strip() for url in raw_urls if url.strip()]
-
-        try:
-            self._persist_urls(urls)
-        except ConfigError as exc:
-            self.log_signal.emit(str(exc))
-            self.start_button.setEnabled(True)
-            return
-        except Exception as exc:  # Catch filesystem issues such as permissions.
-            self.log_signal.emit(f"Failed to update configuration: {exc}")
-            self.start_button.setEnabled(True)
-            return
-
-        if not urls:
-            self.log_signal.emit("No URLs provided. Please enter at least one URL to scrape.")
-            self.start_button.setEnabled(True)
-            return
 
         self.log_signal.emit("Starting scraper in a background thread...")
         self._scraper_thread = threading.Thread(target=self.run_scraper_thread, daemon=True, name="ScraperThread")
@@ -147,11 +111,11 @@ class ScraperGUI(QtWidgets.QWidget):
     # ------------------------------------------------------------------
     # Thread-safe UI helpers
     # ------------------------------------------------------------------
-    @QtCore.pyqtSlot(str)
+    @pyqtSlot(str)
     def _append_log(self, message: str) -> None:
         self.log_output.append(message)
 
-    @QtCore.pyqtSlot()
+    @pyqtSlot()
     def _on_scraping_complete(self) -> None:
         self.start_button.setEnabled(True)
 

@@ -5,12 +5,13 @@ import csv
 import json
 import sqlite3
 import time
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, List, Optional
+from urllib.parse import urljoin
 
 import requests
-from bs4 import BeautifulSoup
+from bs4 import BeautifulSoup, Tag
 
 StatusCallback = Optional[Callable[[str], None]]
 
@@ -48,6 +49,12 @@ class Scraper:
     # ------------------------------------------------------------------
     def login(self) -> None:
         """Perform an optional login step if required by the configuration."""
+        cookies = self.config.get("session_cookies")
+        # Ensure cookies.values() is a list of known type
+        if isinstance(cookies, dict) and any(bool(value) for value in list(cookies.values())):
+            self._emit_status("Session cookies provided; skipping form-based login.")
+            return
+
         if not self.config.get("login_required", False):
             self._emit_status("Login not required; skipping authentication.")
             return
@@ -65,13 +72,14 @@ class Scraper:
             )
 
         payload = {
-            username_field: username,
-            password_field: password,
+            str(username_field): str(username),
+            str(password_field): str(password),
         }
 
         self._emit_status("Submitting login form...")
         try:
-            response = self.session.post(login_url, data=payload, timeout=15)
+            # Explicitly cast login_url to str
+            response = self.session.post(str(login_url), data=payload, timeout=15)
             response.raise_for_status()
             # TODO: Add website-specific login success verification (status code, redirected URL, or DOM check).
         except requests.RequestException as exc:
@@ -101,6 +109,14 @@ class Scraper:
                 data = self._capture_raw(url, response, soup)
             else:
                 data = self._capture_parsed(url, soup)
+
+            tables = self._extract_tables(soup)
+            if tables:
+                data["tables"] = tables
+
+            images = self._extract_images(soup, url)
+            if images:
+                data["images"] = images
 
             self._emit_status(f"Successfully scraped {url}.")
             return data
@@ -240,12 +256,60 @@ class Scraper:
         data: Dict[str, Any] = {
             "url": url,
             "status_code": response.status_code,
-            "retrieved_at": datetime.utcnow().isoformat() + "Z",
+            # Use timezone-aware UTC datetime
+            "retrieved_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
             "raw_html": response.text,
         }
         if include_text:
             data["raw_text"] = soup.get_text(separator="\n", strip=True)
         return data
+
+    def _extract_tables(self, soup: BeautifulSoup) -> List[List[List[str]]]:
+        tables: List[List[List[str]]] = []
+        selectors = self.config.get("table_selectors") or []
+        if isinstance(selectors, str):
+            selectors = [selectors]
+
+        if not isinstance(selectors, list):
+            return tables
+
+        for selector in selectors:
+            if not isinstance(selector, str) or not selector:
+                continue
+            for table_tag in soup.select(str(selector)):
+                parsed_table = self._parse_html_table(table_tag)
+                if parsed_table:
+                    tables.append(parsed_table)
+        return tables
+
+    def _extract_images(self, soup: BeautifulSoup, base_url: str) -> List[str]:
+        images: List[str] = []
+        selectors = self.config.get("image_selectors") or []
+        if isinstance(selectors, str):
+            selectors = [selectors]
+
+        if not isinstance(selectors, list):
+            return images
+
+        for selector in selectors:
+            if not isinstance(selector, str) or not selector:
+                continue
+            for image_tag in soup.select(str(selector)):
+                src = image_tag.get("src")
+                if not isinstance(src, str) or not src:
+                    continue
+                absolute_url = urljoin(base_url, str(src))
+                if absolute_url not in images:
+                    images.append(absolute_url)
+        return images
+
+    def _parse_html_table(self, table: Tag) -> List[List[str]]:
+        rows: List[List[str]] = []
+        for row in table.find_all("tr"):
+            cells = [str(cell.get_text(strip=True)) for cell in row.find_all(["th", "td"])]
+            if cells:
+                rows.append(cells)
+        return rows
 
     def _require_config_value(self, key: str) -> Any:
         value = self.config.get(key)
@@ -262,14 +326,17 @@ class Scraper:
     # ------------------------------------------------------------------
     def _save_to_csv(self, data: List[Dict[str, Any]], output_path: Path) -> None:
         fieldnames = self._collect_fieldnames(data)
+        list_fields = {"answers", "tables", "images"}
         with output_path.open("w", encoding="utf-8", newline="") as csv_file:
             writer = csv.DictWriter(csv_file, fieldnames=fieldnames)
             writer.writeheader()
             for row in data:
-                csv_row = {
-                    field: self._coerce_for_csv(row.get(field))
-                    for field in fieldnames
-                }
+                csv_row: Dict[str, Any] = {}
+                for field in fieldnames:
+                    value = row.get(field)
+                    if field in list_fields and isinstance(value, list):
+                        value = json.dumps(value, ensure_ascii=False)
+                    csv_row[field] = self._coerce_for_csv(value)
                 writer.writerow(csv_row)
 
     def _save_to_json(self, data: List[Dict[str, Any]], output_path: Path) -> None:
@@ -279,6 +346,7 @@ class Scraper:
     def _save_to_sqlite(self, data: List[Dict[str, Any]], output_path: Path) -> None:
         table_name = "scraped_data"
         fieldnames = self._collect_fieldnames(data)
+        list_fields = {"answers", "tables", "images"}
         connection = sqlite3.connect(output_path)
         try:
             cursor = connection.cursor()
@@ -296,10 +364,16 @@ class Scraper:
             column_list = ", ".join(f'"{name}"' for name in fieldnames)
             insert_sql = f"INSERT INTO {table_name} ({column_list}) VALUES ({placeholders})"
 
-            rows = [
-                [self._coerce_for_sqlite(row.get(field)) for field in fieldnames]
-                for row in data
-            ]
+            rows: List[List[Any]] = []
+            for row in data:
+                sqlite_row: List[Any] = []
+                for field in fieldnames:
+                    value = row.get(field)
+                    if field in list_fields and isinstance(value, list):
+                        value = json.dumps(value, ensure_ascii=False)
+                    sqlite_row.append(self._coerce_for_sqlite(value))
+                rows.append(sqlite_row)
+
             cursor.executemany(insert_sql, rows)
             connection.commit()
         finally:
@@ -311,6 +385,9 @@ class Scraper:
             for key in row.keys():
                 if key not in fieldnames:
                     fieldnames.append(key)
+        for required in ("tables", "images"):
+            if required not in fieldnames:
+                fieldnames.append(required)
         return fieldnames
 
     def _coerce_for_csv(self, value: Any) -> Any:
